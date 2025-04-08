@@ -139,7 +139,7 @@
       <div>
         <span>提交订单表示已阅读并同意</span>
         <span
-          ><a href="">《国铁集团铁路旅客运输规程》</a
+          ><a href="">《拿个offer-铁路旅客运输规程》</a
           ><a href="">《服务条款》</a></span
         >
       </div>
