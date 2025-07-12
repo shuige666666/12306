@@ -122,8 +122,9 @@ public class OrderServiceImpl implements OrderService {
     @Transactional(rollbackFor = Exception.class)
     @Override
     public String createTicketOrder(TicketOrderCreateReqDTO requestParam) {
-        // 通过基因法将用户 ID 融入到订单号
+        // 1. 通过基因法将用户 ID 融入到订单号，即生成完整订单号
         String orderSn = OrderIdGeneratorManager.generateId(requestParam.getUserId());
+        // 2. 构建并保存主订单
         OrderDO orderDO = OrderDO.builder().orderSn(orderSn)
                 .orderTime(requestParam.getOrderTime())
                 .departure(requestParam.getDeparture())
@@ -139,16 +140,19 @@ public class OrderServiceImpl implements OrderService {
                 .userId(String.valueOf(requestParam.getUserId()))
                 .build();
         orderMapper.insert(orderDO);
+
+        // 3. 构建订单项和乘客关系数据
         List<TicketOrderItemCreateReqDTO> ticketOrderItems = requestParam.getTicketOrderItems();
         List<OrderItemDO> orderItemDOList = new ArrayList<>();
         List<OrderItemPassengerDO> orderPassengerRelationDOList = new ArrayList<>();
         ticketOrderItems.forEach(each -> {
+            // 3.1 构建订单项
             OrderItemDO orderItemDO = OrderItemDO.builder()
                     .trainId(requestParam.getTrainId())
                     .seatNumber(each.getSeatNumber())
                     .carriageNumber(each.getCarriageNumber())
                     .realName(each.getRealName())
-                    .orderSn(orderSn)
+                    .orderSn(orderSn)   // 关联主订单号
                     .phone(each.getPhone())
                     .seatType(each.getSeatType())
                     .username(requestParam.getUsername()).amount(each.getAmount()).carriageNumber(each.getCarriageNumber())
@@ -156,9 +160,10 @@ public class OrderServiceImpl implements OrderService {
                     .ticketType(each.getTicketType())
                     .idType(each.getIdType())
                     .userId(String.valueOf(requestParam.getUserId()))
-                    .status(0)
+                    .status(0)  // 初始状态
                     .build();
             orderItemDOList.add(orderItemDO);
+            // 3.2 构建乘客关系
             OrderItemPassengerDO orderPassengerRelationDO = OrderItemPassengerDO.builder()
                     .idType(each.getIdType())
                     .idCard(each.getIdCard())
@@ -166,8 +171,12 @@ public class OrderServiceImpl implements OrderService {
                     .build();
             orderPassengerRelationDOList.add(orderPassengerRelationDO);
         });
+
+        // 4. 批量保存订单项和乘客关系
+        // 这是一个单独的表，用于存储订单项和乘客的关联信息。
         orderItemService.saveBatch(orderItemDOList);
         orderPassengerRelationService.saveBatch(orderPassengerRelationDOList);
+        // 5. 发送延迟关单消息
         try {
             // 发送 RocketMQ 延时消息，指定时间后取消订单
             DelayCloseOrderEvent delayCloseOrderEvent = DelayCloseOrderEvent.builder()
@@ -175,20 +184,29 @@ public class OrderServiceImpl implements OrderService {
                     .departure(requestParam.getDeparture())
                     .arrival(requestParam.getArrival())
                     .orderSn(orderSn)
-                    .trainPurchaseTicketResults(requestParam.getTicketOrderItems())
+                    .trainPurchaseTicketResults(requestParam.getTicketOrderItems())     //乘车人的购票信息
                     .build();
-            // 创建订单并支付后延时关闭订单消息怎么办？详情查看：https://nageoffer.com/12306/question
+            // 发送
             SendResult sendResult = delayCloseOrderSendProduce.sendMessage(delayCloseOrderEvent);
+            // 消息发送失败处理
             if (!Objects.equals(sendResult.getSendStatus(), SendStatus.SEND_OK)) {
                 throw new ServiceException("投递延迟关闭订单消息队列失败");
             }
         } catch (Throwable ex) {
+            // 捕获消息发送过程中可能发生的任何异常。记录错误日志，并重新抛出异常。
+            // 重新抛出异常会触发外部的 `@Transactional` 注解，导致之前对数据库的插入操作（orderDO, orderItemDOList, orderPassengerRelationDOList）回滚。
             log.error("延迟关闭订单消息队列发送错误，请求参数：{}", JSON.toJSONString(requestParam), ex);
             throw ex;
         }
+        // 6. 返回订单号
         return orderSn;
     }
 
+    /**
+     * 订单关闭入口
+     * @param requestParam 关闭火车票订单入参
+     * @return
+     */
     @Transactional(rollbackFor = Exception.class)
     @Override
     public boolean closeTickOrder(CancelTicketOrderReqDTO requestParam) {
@@ -197,30 +215,38 @@ public class OrderServiceImpl implements OrderService {
                 .eq(OrderDO::getOrderSn, orderSn)
                 .select(OrderDO::getStatus);
         OrderDO orderDO = orderMapper.selectOne(queryWrapper);
+        // 状态校验
         if (Objects.isNull(orderDO) || orderDO.getStatus() != OrderStatusEnum.PENDING_PAYMENT.getStatus()) {
+            // 订单不存在或非待支付状态的话
             return false;
         }
         // 原则上订单关闭和订单取消这两个方法可以复用，为了区分未来考虑到的场景，这里对方法进行拆分但复用逻辑
+        // 委托给取消方法执行
         return cancelTickOrder(requestParam);
     }
 
     @Transactional(rollbackFor = Exception.class)
     @Override
     public boolean cancelTickOrder(CancelTicketOrderReqDTO requestParam) {
+        // 1. 获取完整订单信息
         String orderSn = requestParam.getOrderSn();
         LambdaQueryWrapper<OrderDO> queryWrapper = Wrappers.lambdaQuery(OrderDO.class)
                 .eq(OrderDO::getOrderSn, orderSn);
         OrderDO orderDO = orderMapper.selectOne(queryWrapper);
+        // 2. 状态预校验
         if (orderDO == null) {
             throw new ServiceException(OrderCanalErrorCodeEnum.ORDER_CANAL_UNKNOWN_ERROR);
         } else if (orderDO.getStatus() != OrderStatusEnum.PENDING_PAYMENT.getStatus()) {
             throw new ServiceException(OrderCanalErrorCodeEnum.ORDER_CANAL_STATUS_ERROR);
         }
+        // 3. 获取分布式锁
         RLock lock = redissonClient.getLock(StrBuilder.create("order:canal:order_sn_").append(orderSn).toString());
+        // 4. 尝试加锁（防重复提交）
         if (!lock.tryLock()) {
             throw new ClientException(OrderCanalErrorCodeEnum.ORDER_CANAL_REPETITION_ERROR);
         }
         try {
+            // 5. 更新订单主表状态
             OrderDO updateOrderDO = new OrderDO();
             updateOrderDO.setStatus(OrderStatusEnum.CLOSED.getStatus());
             LambdaUpdateWrapper<OrderDO> updateWrapper = Wrappers.lambdaUpdate(OrderDO.class)
@@ -229,6 +255,7 @@ public class OrderServiceImpl implements OrderService {
             if (updateResult <= 0) {
                 throw new ServiceException(OrderCanalErrorCodeEnum.ORDER_CANAL_ERROR);
             }
+            // 6. 更新订单明细状态
             OrderItemDO updateOrderItemDO = new OrderItemDO();
             updateOrderItemDO.setStatus(OrderItemStatusEnum.CLOSED.getStatus());
             LambdaUpdateWrapper<OrderItemDO> updateItemWrapper = Wrappers.lambdaUpdate(OrderItemDO.class)

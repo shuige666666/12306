@@ -69,19 +69,23 @@ public class PassengerServiceImpl implements PassengerService {
 
     @Override
     public List<PassengerRespDTO> listPassengerQueryByUsername(String username) {
+        // 1. 获取乘客列表数据（优先缓存）
         String actualUserPassengerListStr = getActualUserPassengerListStr(username);
+        // 2. 处理数据转换
         return Optional.ofNullable(actualUserPassengerListStr)
-                .map(each -> JSON.parseArray(each, PassengerDO.class))
-                .map(each -> BeanUtil.convert(each, PassengerRespDTO.class))
+                .map(each -> JSON.parseArray(each, PassengerDO.class))      // 把列表里的每一个JSON对象转为List<PassengerDO>
+                .map(each -> BeanUtil.convert(each, PassengerRespDTO.class))        // 把List<PassengerDO>对象转为List<PassengerRespDTO>
                 .orElse(null);
     }
 
     private String getActualUserPassengerListStr(String username) {
+        // 线程安全的redis查询
         return distributedCache.safeGet(
                 USER_PASSENGER_LIST + username,
                 String.class,
                 () -> {
-                    LambdaQueryWrapper<PassengerDO> queryWrapper = Wrappers.lambdaQuery(PassengerDO.class)
+                    LambdaQueryWrapper<PassengerDO> queryWrapper = Wrappers
+                            .lambdaQuery(PassengerDO.class)  // 创建Lambda查询包装器
                             .eq(PassengerDO::getUsername, username);
                     List<PassengerDO> passengerDOList = passengerMapper.selectList(queryWrapper);
                     return CollUtil.isNotEmpty(passengerDOList) ? JSON.toJSONString(passengerDOList) : null;

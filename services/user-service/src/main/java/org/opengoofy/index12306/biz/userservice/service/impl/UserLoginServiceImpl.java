@@ -161,6 +161,7 @@ public class UserLoginServiceImpl implements UserLoginService {
     @Transactional(rollbackFor = Exception.class)
     @Override
     public UserRegisterRespDTO register(UserRegisterReqDTO requestParam) {
+        // 责任链模式验证注册用户请求参数是否合规
         abstractChainContext.handler(UserChainMarkEnum.USER_REGISTER_FILTER.name(), requestParam);
         RLock lock = redissonClient.getLock(LOCK_USER_REGISTER + requestParam.getUsername());
         boolean tryLock = lock.tryLock();
@@ -169,19 +170,23 @@ public class UserLoginServiceImpl implements UserLoginService {
         }
         try {
             try {
+                // 注册用户信息
                 int inserted = userMapper.insert(BeanUtil.convert(requestParam, UserDO.class));
                 if (inserted < 1) {
                     throw new ServiceException(USER_REGISTER_FAIL);
                 }
             } catch (DuplicateKeyException dke) {
+                // 这里catch的DuplicateKeyException是主键冲突异常
                 log.error("用户名 [{}] 重复注册", requestParam.getUsername());
                 throw new ServiceException(HAS_USERNAME_NOTNULL);
             }
+            //【下面就是把用户信息写入到邮箱-用户名路由表和手机号-用户名路由表，方便注册时快速分片查询信息】
             UserPhoneDO userPhoneDO = UserPhoneDO.builder()
                     .phone(requestParam.getPhone())
                     .username(requestParam.getUsername())
                     .build();
             try {
+                // 注册用户手机号信息
                 userPhoneMapper.insert(userPhoneDO);
             } catch (DuplicateKeyException dke) {
                 log.error("用户 [{}] 注册手机号 [{}] 重复", requestParam.getUsername(), requestParam.getPhone());
@@ -193,6 +198,7 @@ public class UserLoginServiceImpl implements UserLoginService {
                         .username(requestParam.getUsername())
                         .build();
                 try {
+                    // 注册用户邮箱信息
                     userMailMapper.insert(userMailDO);
                 } catch (DuplicateKeyException dke) {
                     log.error("用户 [{}] 注册邮箱 [{}] 重复", requestParam.getUsername(), requestParam.getMail());
@@ -200,10 +206,12 @@ public class UserLoginServiceImpl implements UserLoginService {
                 }
             }
             String username = requestParam.getUsername();
+            // 删除用户可复用数据
             userReuseMapper.delete(Wrappers.update(new UserReuseDO(username)));
             StringRedisTemplate instance = (StringRedisTemplate) distributedCache.getInstance();
+            // 删除用户可复用缓存数据
             instance.opsForSet().remove(USER_REGISTER_REUSE_SHARDING + hashShardingIdx(username), username);
-            // 布隆过滤器设计问题：设置多大、碰撞率以及初始容量不够了怎么办？详情查看：https://nageoffer.com/12306/question
+            // 增加已存在用户名布隆过滤器
             userRegisterCachePenetrationBloomFilter.add(username);
         } finally {
             lock.unlock();

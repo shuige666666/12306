@@ -30,7 +30,7 @@ import java.io.Serializable;
 @Data
 @Accessors(chain = true)
 public class Result<T> implements Serializable {
-
+    //  一个对象序列化的接口，一个类只有实现了Serializable接口，它的对象才是可序列化的
     @Serial
     private static final long serialVersionUID = 5679018624309023727L;
 

@@ -87,40 +87,61 @@ public final class TicketAvailabilityTokenBucket {
      * @return 是否获取列车车票余量令牌桶中的令牌返回结果
      */
     public TokenResultDTO takeTokenFromBucket(PurchaseTicketReqDTO requestParam) {
+        // 1. 获取列车信息
         TrainDO trainDO = distributedCache.safeGet(
                 TRAIN_INFO + requestParam.getTrainId(),
                 TrainDO.class,
                 () -> trainMapper.selectById(requestParam.getTrainId()),
                 ADVANCE_TICKET_DAY,
                 TimeUnit.DAYS);
+        // 2. 获取列车经停站之间的数据集合，因为一旦失效要读取整个列车的令牌并重新赋值
+        // 即获取这趟列车从始发站到终点站的所有连续区间（例如：A-B, B-C, C-D）。
+        // 这个列表将用于初始化或重新加载令牌桶，因为令牌桶的粒度是针对每个区间和座位类型的。
         List<RouteDTO> routeDTOList = trainStationService
                 .listTrainStationRoute(requestParam.getTrainId(), trainDO.getStartStation(), trainDO.getEndStation());
+
         StringRedisTemplate stringRedisTemplate = (StringRedisTemplate) distributedCache.getInstance();
+
+        // 令牌容器是个 Hash 结构
+        // 3. 组装令牌桶在 Redis 中的 Hash Key
         String tokenBucketHashKey = TICKET_AVAILABILITY_TOKEN_BUCKET + requestParam.getTrainId();
+        // 4.判断令牌容器是否存在
         Boolean hasKey = distributedCache.hasKey(tokenBucketHashKey);
+        // 5.如果令牌容器 Hash 数据结构不存在了，执行加载流程
         if (!hasKey) {
+            // 5.1.为了避免出现并发读写问题，所以这里通过分布式锁锁定
             RLock lock = redissonClient.getLock(String.format(LOCK_TICKET_AVAILABILITY_TOKEN_BUCKET, requestParam.getTrainId()));
             if (!lock.tryLock()) {
                 throw new ServiceException("购票异常，请稍候再试");
             }
             try {
+                // 5.2.双重判定锁，避免加载数据请求多次请求数据库
                 Boolean hasKeyTwo = distributedCache.hasKey(tokenBucketHashKey);
                 if (!hasKeyTwo) {
+                    // 根据列车类型获取所有支持的座位类型。
                     List<Integer> seatTypes = VehicleTypeEnum.findSeatTypesByCode(trainDO.getTrainType());
+                    // 用于构建 Redis Hash 结构的本地 Map。
                     Map<String, String> ticketAvailabilityTokenMap = new HashMap<>();
+                    // 遍历列车的所有区间（例如：北京-天津，天津-济南）。
                     for (RouteDTO each : routeDTOList) {
+                        // 查询每个区间每种座位类型，当前实际可用的座位数量。这是令牌桶的初始“库存”来源。
                         List<SeatTypeCountDTO> seatTypeCountDTOList = seatService.listSeatTypeCount(Long.parseLong(requestParam.getTrainId()), each.getStartStation(), each.getEndStation(), seatTypes);
                         for (SeatTypeCountDTO eachSeatTypeCountDTO : seatTypeCountDTOList) {
+                            // 组装 Hash 数据结构内部的 Key  "起始站_终点站_座位类型" , 即如 “济南西_宁波_0”
                             String buildCacheKey = StrUtil.join("_", each.getStartStation(), each.getEndStation(), eachSeatTypeCountDTO.getSeatType());
+                            // 一个 Hash 结构下有很多 Key，为了避免多次网络 IO，这里组装成一个本地 Map，通过 putAll 方法请求一次 Redis
                             ticketAvailabilityTokenMap.put(buildCacheKey, String.valueOf(eachSeatTypeCountDTO.getSeatCount()));
                         }
                     }
+                    // 将组装好的 Map 数据，赋值到 Redis
                     stringRedisTemplate.opsForHash().putAll(TICKET_AVAILABILITY_TOKEN_BUCKET + requestParam.getTrainId(), ticketAvailabilityTokenMap);
                 }
             } finally {
                 lock.unlock();
             }
         }
+        // 6.获取到 Redis 执行的 Lua 脚本的内容
+        // Singleton 确保脚本只加载一次。
         DefaultRedisScript<String> actual = Singleton.get(LUA_TICKET_AVAILABILITY_TOKEN_BUCKET_PATH, () -> {
             DefaultRedisScript<String> redisScript = new DefaultRedisScript<>();
             redisScript.setScriptSource(new ResourceScriptSource(new ClassPathResource(LUA_TICKET_AVAILABILITY_TOKEN_BUCKET_PATH)));
@@ -128,8 +149,12 @@ public final class TicketAvailabilityTokenBucket {
             return redisScript;
         });
         Assert.notNull(actual);
+        // 7. 准备 Lua 脚本所需的参数
+        // 7.1. 乘客购票的座位类型及数量统计，统计用户请求中每种座位类型需要购买的数量（例如：三等座2张，二等座1张）。
         Map<Integer, Long> seatTypeCountMap = requestParam.getPassengers().stream()
                 .collect(Collectors.groupingBy(PurchaseTicketPassengerDetailDTO::getSeatType, Collectors.counting()));
+        // 将统计结果转换为 JSON 数组格式，以便作为参数传递给 Lua 脚本。
+        // 示例：[{"seatType":"1","count":"2"}, {"seatType":"3","count":"1"}]
         JSONArray seatTypeCountArray = seatTypeCountMap.entrySet().stream()
                 .map(entry -> {
                     JSONObject jsonObject = new JSONObject();
@@ -138,13 +163,31 @@ public final class TicketAvailabilityTokenBucket {
                     return jsonObject;
                 })
                 .collect(Collectors.toCollection(JSONArray::new));
+
+        // 7.2.获取需要扣减的站点
         List<RouteDTO> takeoutRouteDTOList = trainStationService
                 .listTakeoutTrainStationRoute(requestParam.getTrainId(), requestParam.getDeparture(), requestParam.getArrival());
         String luaScriptKey = StrUtil.join("_", requestParam.getDeparture(), requestParam.getArrival());
-        String resultStr = stringRedisTemplate.execute(actual, Lists.newArrayList(tokenBucketHashKey, luaScriptKey), JSON.toJSONString(seatTypeCountArray), JSON.toJSONString(takeoutRouteDTOList));
+
+        // 8.调用 Redis 执行 Lua 脚本。
+        // `actual` 是加载的 Lua 脚本对象。
+        // `Lists.newArrayList(tokenBucketHashKey, luaScriptKey)` 是存储 Redis Hash 结构的 Key 值，对应lua中的KEYS[1]、KEYS[2]
+        // seatTypeCountArray：需要扣减的座位类型以及对应数量。ARGV[1]
+        // takeoutRouteDTOList：需要扣减的列车站点。ARGV[2]
+        // Lua 脚本内部会根据这些参数，遍历 `takeoutRouteDTOList` 中的每个区间，
+        // 然后检查 `tokenBucketHashKey` 对应的 Hash 中，每个区间-座位类型的令牌是否足够扣减 `seatTypeCountArray` 中对应的数量。
+        // 如果所有涉及的区间和座位类型的令牌都足够，则原子性地进行扣减并返回成功；否则，不进行任何扣减并返回失败。
+        String resultStr = stringRedisTemplate.execute(
+                actual,
+                Lists.newArrayList(tokenBucketHashKey, luaScriptKey),
+                JSON.toJSONString(seatTypeCountArray),
+                JSON.toJSONString(takeoutRouteDTOList));
+        // 9. 解析 Lua 脚本的执行结果
+        // Lua 脚本通常会返回一个 JSON 字符串，这里将其解析为 `TokenResultDTO` 对象。
         TokenResultDTO result = JSON.parseObject(resultStr, TokenResultDTO.class);
+        // 10. 返回最终结果
         return result == null
-                ? TokenResultDTO.builder().tokenIsNull(Boolean.TRUE).build()
+                ? TokenResultDTO.builder().tokenIsNull(Boolean.TRUE).build()  // 如果 Lua 脚本返回空，可能是异常情况，构建一个带有 tokenIsNull 标志的DTO
                 : result;
     }
 

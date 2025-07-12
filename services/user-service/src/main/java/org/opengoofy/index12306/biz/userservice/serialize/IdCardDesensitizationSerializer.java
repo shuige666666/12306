@@ -30,8 +30,10 @@ import java.io.IOException;
  */
 public class IdCardDesensitizationSerializer extends JsonSerializer<String> {
 
+    // 当 SpringMVC 通过 Jackson 进行序列化数据时，操作证件号码和手机号两个字段就会采用咱们自定义的序列化器，完成敏感信息脱敏功能
     @Override
     public void serialize(String idCard, JsonGenerator jsonGenerator, SerializerProvider serializerProvider) throws IOException {
+        // 利用 Hutool 的 DesensitizedUtil 快速脱敏
         String idCardDesensitization = DesensitizedUtil.idCardNum(idCard, 4, 4);
         jsonGenerator.writeString(idCardDesensitization);
     }

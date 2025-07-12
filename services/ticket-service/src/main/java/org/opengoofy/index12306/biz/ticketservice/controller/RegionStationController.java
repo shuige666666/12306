@@ -18,6 +18,7 @@
 package org.opengoofy.index12306.biz.ticketservice.controller;
 
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.opengoofy.index12306.biz.ticketservice.dto.req.RegionStationQueryReqDTO;
 import org.opengoofy.index12306.biz.ticketservice.dto.resp.RegionStationQueryRespDTO;
 import org.opengoofy.index12306.biz.ticketservice.dto.resp.StationQueryRespDTO;
@@ -35,6 +36,7 @@ import java.util.List;
  */
 @RestController
 @RequiredArgsConstructor
+@Slf4j
 public class RegionStationController {
 
     private final RegionStationService regionStationService;

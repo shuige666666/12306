@@ -39,6 +39,7 @@ import java.util.List;
 public interface TicketOrderRemoteService {
 
     /**
+     * 
      * 跟据订单号查询车票订单
      *
      * @param orderSn 列车订单号

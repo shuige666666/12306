@@ -60,13 +60,16 @@ public class SeatMarginCacheLoader {
     private final TrainStationService trainStationService;
 
     public Map<String, String> load(String trainId, String seatType, String departure, String arrival) {
+        // 用于存储所有可能路线区间的余票信息
         Map<String, Map<String, String>> trainStationRemainingTicketMaps = new LinkedHashMap<>();
+        // 构建前缀
         String keySuffix = CacheUtil.buildKey(trainId, departure, arrival);
-        // 缓存带来的分布式互斥锁还有哪些优化项？详情查看：https://nageoffer.com/12306/question
+        // 加锁
         RLock lock = redissonClient.getLock(String.format(LOCK_SAFE_LOAD_SEAT_MARGIN_GET, keySuffix));
         lock.lock();
         try {
             StringRedisTemplate stringRedisTemplate = (StringRedisTemplate) distributedCache.getInstance();
+            // 双重检查
             Object quantityObj = stringRedisTemplate.opsForHash().get(TRAIN_STATION_REMAINING_TICKET + keySuffix, seatType);
             if (CacheUtil.isNullOrBlank(quantityObj)) {
                 TrainDO trainDO = distributedCache.safeGet(
@@ -77,20 +80,24 @@ public class SeatMarginCacheLoader {
                         TimeUnit.DAYS
                 );
                 List<RouteDTO> routeDTOList = trainStationService.listTrainStationRoute(trainId, trainDO.getStartStation(), trainDO.getEndStation());
+                // 【获取列车途经的所有路线区间】
                 if (CollUtil.isNotEmpty(routeDTOList)) {
                     switch (trainDO.getTrainType()) {
+                        // 列车类型trainType  0：高铁 1：动车 2：普通车
                         // TODO 通过已有列车类型座位枚举重构
-                        case 0 -> {
+                        case 0 -> {     //高铁
                             for (RouteDTO each : routeDTOList) {
                                 Map<String, String> trainStationRemainingTicket = new LinkedHashMap<>();
+                                // 对每个席别调用 selectSeatMargin 查询该区间的余票
                                 trainStationRemainingTicket.put("0", selectSeatMargin(trainId, 0, each.getStartStation(), each.getEndStation()));
                                 trainStationRemainingTicket.put("1", selectSeatMargin(trainId, 1, each.getStartStation(), each.getEndStation()));
                                 trainStationRemainingTicket.put("2", selectSeatMargin(trainId, 2, each.getStartStation(), each.getEndStation()));
                                 String actualKeySuffix = CacheUtil.buildKey(trainId, each.getStartStation(), each.getEndStation());
+                                // 将该区间的余票信息添加到 trainStationRemainingTicketMaps
                                 trainStationRemainingTicketMaps.put(TRAIN_STATION_REMAINING_TICKET + actualKeySuffix, trainStationRemainingTicket);
                             }
                         }
-                        case 1 -> {
+                        case 1 -> {     //动车
                             for (RouteDTO each : routeDTOList) {
                                 Map<String, String> trainStationRemainingTicket = new LinkedHashMap<>();
                                 trainStationRemainingTicket.put("3", selectSeatMargin(trainId, 3, each.getStartStation(), each.getEndStation()));
@@ -101,7 +108,7 @@ public class SeatMarginCacheLoader {
                                 trainStationRemainingTicketMaps.put(TRAIN_STATION_REMAINING_TICKET + actualKeySuffix, trainStationRemainingTicket);
                             }
                         }
-                        case 2 -> {
+                        case 2 -> {     //普通车
                             for (RouteDTO each : routeDTOList) {
                                 Map<String, String> trainStationRemainingTicket = new LinkedHashMap<>();
                                 trainStationRemainingTicket.put("6", selectSeatMargin(trainId, 6, each.getStartStation(), each.getEndStation()));
@@ -114,11 +121,13 @@ public class SeatMarginCacheLoader {
                         }
                     }
                 } else {
+                    // 如果没有找到路线区间（不应该发生），则默认所有席别余票为0
                     Map<String, String> trainStationRemainingTicket = new LinkedHashMap<>();
                     VehicleTypeEnum.findSeatTypesByCode(trainDO.getTrainType())
                             .forEach(each -> trainStationRemainingTicket.put(String.valueOf(each), "0"));
                     trainStationRemainingTicketMaps.put(TRAIN_STATION_REMAINING_TICKET + keySuffix, trainStationRemainingTicket);
                 }
+                // 4. 将计算出的所有路线区间的余票批量写入Redis缓存
                 // TODO LUA 脚本执行
                 trainStationRemainingTicketMaps.forEach((cacheKey, cacheMap) -> stringRedisTemplate.opsForHash().putAll(cacheKey, cacheMap));
             }
@@ -136,6 +145,8 @@ public class SeatMarginCacheLoader {
                 .eq(SeatDO::getSeatStatus, SeatStatusEnum.AVAILABLE.getCode())
                 .eq(SeatDO::getStartStation, departure)
                 .eq(SeatDO::getEndStation, arrival);
+        // 5. 返回当前请求路线区间的余票信息
+        // 注意：load 方法会加载并缓存一个列车的所有路线区间的余票，但只返回当前请求的余票。
         return Optional.ofNullable(seatMapper.selectCount(queryWrapper))
                 .map(String::valueOf)
                 .orElse("0");

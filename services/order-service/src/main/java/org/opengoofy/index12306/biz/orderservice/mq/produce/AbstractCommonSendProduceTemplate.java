@@ -61,13 +61,16 @@ public abstract class AbstractCommonSendProduceTemplate<T> {
      * @return 消息发送返回结果
      */
     public SendResult sendMessage(T messageSendEvent) {
+        // 1.构建消息发送事件基础实体
         BaseSendExtendDTO baseSendExtendDTO = buildBaseSendExtendParam(messageSendEvent);
         SendResult sendResult;
         try {
+            // 2. 构造目标地址（Topic:Tag）
             StringBuilder destinationBuilder = StrUtil.builder().append(baseSendExtendDTO.getTopic());
             if (StrUtil.isNotBlank(baseSendExtendDTO.getTag())) {
                 destinationBuilder.append(":").append(baseSendExtendDTO.getTag());
             }
+            // 3. 发送消息
             sendResult = rocketMQTemplate.syncSend(
                     destinationBuilder.toString(),
                     buildMessage(messageSendEvent, baseSendExtendDTO),

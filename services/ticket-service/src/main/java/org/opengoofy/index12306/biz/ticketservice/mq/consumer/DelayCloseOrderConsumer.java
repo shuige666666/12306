@@ -59,6 +59,7 @@ import static org.opengoofy.index12306.biz.ticketservice.common.constant.RedisKe
 @Component
 @RequiredArgsConstructor
 @RocketMQMessageListener(
+        //RocketMQ消费者声明
         topic = TicketRocketMQConstant.ORDER_DELAY_CLOSE_TOPIC_KEY,
         selectorExpression = TicketRocketMQConstant.ORDER_DELAY_CLOSE_TAG_KEY,
         consumerGroup = TicketRocketMQConstant.TICKET_DELAY_CLOSE_CG_KEY
@@ -71,9 +72,11 @@ public class DelayCloseOrderConsumer implements RocketMQListener<MessageWrapper<
     private final DistributedCache distributedCache;
     private final TicketAvailabilityTokenBucket ticketAvailabilityTokenBucket;
 
+    // 从配置文件中读取票务可用性缓存更新类型
     @Value("${ticket.availability.cache-update.type:}")
     private String ticketAvailabilityCacheUpdateType;
 
+    // 幂等组件
     @Idempotent(
             uniqueKeyPrefix = "index12306-ticket:delay_close_order:",
             key = "#delayCloseOrderEventMessageWrapper.getKeys()+'_'+#delayCloseOrderEventMessageWrapper.hashCode()",
@@ -84,20 +87,24 @@ public class DelayCloseOrderConsumer implements RocketMQListener<MessageWrapper<
     @Override
     public void onMessage(MessageWrapper<DelayCloseOrderEvent> delayCloseOrderEventMessageWrapper) {
         log.info("[延迟关闭订单] 开始消费：{}", JSON.toJSONString(delayCloseOrderEventMessageWrapper));
+        // 提取消息体
         DelayCloseOrderEvent delayCloseOrderEvent = delayCloseOrderEventMessageWrapper.getMessage();
         String orderSn = delayCloseOrderEvent.getOrderSn();
         Result<Boolean> closedTickOrder;
         try {
+            // 远程调用订单服务，尝试关闭订单
             closedTickOrder = ticketOrderRemoteService.closeTickOrder(new CancelTicketOrderReqDTO(orderSn));
         } catch (Throwable ex) {
             log.error("[延迟关闭订单] 订单号：{} 远程调用订单服务失败", orderSn, ex);
             throw ex;
         }
         if (closedTickOrder.isSuccess() && !StrUtil.equals(ticketAvailabilityCacheUpdateType, "binlog")) {
+            // 检查订单状态（用户可能在最后时刻支付）
             if (!closedTickOrder.getData()) {
                 log.info("[延迟关闭订单] 订单号：{} 用户已支付订单", orderSn);
                 return;
             }
+            // 1. 释放数据库座位库存
             String trainId = delayCloseOrderEvent.getTrainId();
             String departure = delayCloseOrderEvent.getDeparture();
             String arrival = delayCloseOrderEvent.getArrival();
@@ -108,11 +115,15 @@ public class DelayCloseOrderConsumer implements RocketMQListener<MessageWrapper<
                 log.error("[延迟关闭订单] 订单号：{} 回滚列车DB座位状态失败", orderSn, ex);
                 throw ex;
             }
+            // 2. 回滚Redis缓存余票
             try {
                 StringRedisTemplate stringRedisTemplate = (StringRedisTemplate) distributedCache.getInstance();
+                // 按座位类型分组
                 Map<Integer, List<TrainPurchaseTicketRespDTO>> seatTypeMap = trainPurchaseTicketResults.stream()
                         .collect(Collectors.groupingBy(TrainPurchaseTicketRespDTO::getSeatType));
+                // 获取列车经停路线
                 List<RouteDTO> routeDTOList = trainStationService.listTakeoutTrainStationRoute(trainId, departure, arrival);
+                // 遍历所有区段更新余票
                 routeDTOList.forEach(each -> {
                     String keySuffix = StrUtil.join("_", trainId, each.getStartStation(), each.getEndStation());
                     seatTypeMap.forEach((seatType, trainPurchaseTicketRespDTOList) -> {
@@ -120,6 +131,7 @@ public class DelayCloseOrderConsumer implements RocketMQListener<MessageWrapper<
                                 .increment(TRAIN_STATION_REMAINING_TICKET + keySuffix, String.valueOf(seatType), trainPurchaseTicketRespDTOList.size());
                     });
                 });
+                // 3. 回滚令牌桶余量
                 TicketOrderDetailRespDTO ticketOrderDetail = BeanUtil.convert(delayCloseOrderEvent, TicketOrderDetailRespDTO.class);
                 ticketOrderDetail.setPassengerDetails(BeanUtil.convert(delayCloseOrderEvent.getTrainPurchaseTicketResults(), TicketOrderPassengerDetailRespDTO.class));
                 ticketAvailabilityTokenBucket.rollbackInBucket(ticketOrderDetail);

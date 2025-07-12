@@ -159,6 +159,7 @@ public class StringRedisTemplateProxy implements DistributedCache {
             if (CacheUtil.isNullOrBlank(result = get(key, clazz))) {
                 // 如果访问 cacheLoader 加载数据为空，执行后置函数操作
                 if (CacheUtil.isNullOrBlank(result = loadAndSet(key, cacheLoader, timeout, timeUnit, true, bloomFilter))) {
+                    // 当数据库查不到数据时，触发该回调
                     Optional.ofNullable(cacheGetIfAbsent).ifPresent(each -> each.execute(key));
                 }
             }

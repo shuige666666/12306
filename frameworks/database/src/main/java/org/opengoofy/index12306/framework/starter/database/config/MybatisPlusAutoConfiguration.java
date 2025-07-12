@@ -37,8 +37,11 @@ public class MybatisPlusAutoConfiguration {
      */
     @Bean
     public MybatisPlusInterceptor mybatisPlusInterceptor() {
+        // 1. 创建MyBatis-Plus的核心拦截器对象
         MybatisPlusInterceptor interceptor = new MybatisPlusInterceptor();
+        // 2. 添加分页内部拦截器，并指定数据库类型为MySQL
         interceptor.addInnerInterceptor(new PaginationInnerInterceptor(DbType.MYSQL));
+        // 3. 返回配置好的拦截器
         return interceptor;
     }
 

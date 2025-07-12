@@ -4,8 +4,8 @@ spring:
   application:
     name: index12306-gateway${unique-name:}-service
   profiles:
-    active: aggregation
-    # active: dev
+#    active: aggregation
+    active: dev
   cloud:
     nacos:
       discovery:

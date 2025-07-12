@@ -38,6 +38,7 @@ public class OrderCommonDataBaseComplexAlgorithm implements ComplexKeysShardingA
     @Getter
     private Properties props;
 
+    // 分库数量，读取的配置中定义的分库数量
     private int shardingCount;
     private int tableShardingCount;
 
@@ -46,22 +47,30 @@ public class OrderCommonDataBaseComplexAlgorithm implements ComplexKeysShardingA
 
     @Override
     public Collection<String> doSharding(Collection availableTargetNames, ComplexKeysShardingValue shardingValue) {
+
         Map<String, Collection<Comparable<?>>> columnNameAndShardingValuesMap = shardingValue.getColumnNameAndShardingValuesMap();
         Collection<String> result = new LinkedHashSet<>(availableTargetNames.size());
         if (CollUtil.isNotEmpty(columnNameAndShardingValuesMap)) {
+            // 获取到 SQL 中包含的用户 ID 对应值
             String userId = "user_id";
             Collection<Comparable<?>> customerUserIdCollection = columnNameAndShardingValuesMap.get(userId);
+            // 如果使用 MybatisPlus 因为传入时没有强类型判断，所以有可能用户 ID 是字符串，也可能是 Long 等数值
+            // 比如传入的用户 ID 可能是 1683025552364568576 也可能是 '1683025552364568576'
+            // 根据不同的值类型，做出不同的获取后六位判断。字符串直接截取后六位，Long 类型直接通过 % 运算获取后六位
             if (CollUtil.isNotEmpty(customerUserIdCollection)) {
                 String dbSuffix;
                 Comparable<?> comparable = customerUserIdCollection.stream().findFirst().get();
                 if (comparable instanceof String) {
                     String actualUserId = comparable.toString();
+                    // 获取真实数据库的方法其实还是通过 HASH_MOD 方式取模的，shardingCount 就是咱们配置中的分库数量
                     dbSuffix = String.valueOf(hashShardingValue(actualUserId.substring(Math.max(actualUserId.length() - 6, 0))) % shardingCount / tableShardingCount);
                 } else {
                     dbSuffix = String.valueOf(hashShardingValue((Long) comparable % 1000000) % shardingCount / tableShardingCount);
                 }
                 result.add("ds_" + dbSuffix);
             } else {
+                // 如果对订单中的 SQL 语句不包含用户 ID 那么就要从订单号中获取后六位，也就是用户 ID 后六位
+                // 流程同用户 ID 获取流程
                 String orderSn = "order_sn";
                 String dbSuffix;
                 Collection<Comparable<?>> orderSnCollection = columnNameAndShardingValuesMap.get(orderSn);

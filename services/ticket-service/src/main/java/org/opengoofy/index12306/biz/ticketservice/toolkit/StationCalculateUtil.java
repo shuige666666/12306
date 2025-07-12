@@ -65,30 +65,41 @@ public final class StationCalculateUtil {
      */
     public static List<RouteDTO> takeoutStation(List<String> stations, String startStation, String endStation) {
         List<RouteDTO> takeoutStationList = new ArrayList<>();
+        // 获取起止站点的索引位置
         int startIndex = stations.indexOf(startStation);
         int endIndex = stations.indexOf(endStation);
         if (startIndex == -1 || endIndex == -1 || startIndex >= endIndex) {
             return takeoutStationList;
         }
-        if (startIndex != 0) {
-            for (int i = 0; i < startIndex; i++) {
-                for (int j = 1; j < stations.size() - startIndex; j++) {
-                    takeoutStationList.add(new RouteDTO(stations.get(i), stations.get(startIndex + j)));
+
+        // ===== 第一段逻辑：处理出发站之前的站点 =====
+        if (startIndex != 0) { // 出发站不是始发站才需要处理
+            for (int i = 0; i < startIndex; i++) { // 遍历出发站前的所有站点
+                for (int j = 1; j < stations.size() - startIndex; j++) { // 计算跨站组合
+                    takeoutStationList.add(
+                            new RouteDTO(
+                                    stations.get(i), //出发站之前的站点
+                                    stations.get(startIndex + j))); // 出发站之后的站点（如济南/南京/上海）
                 }
             }
         }
-        for (int i = startIndex; i <= endIndex; i++) {
+
+        // ===== 第二段逻辑：处理出发到到达区段 =====
+        for (int i = startIndex; i <= endIndex; i++) {  // 从出发站到终点站
             for (int j = i + 1; j < stations.size() && i < endIndex; j++) {
-                takeoutStationList.add(new RouteDTO(stations.get(i), stations.get(j)));
+                takeoutStationList.add(
+                        new RouteDTO(
+                                stations.get(i), //路程内包含的站点（如天津/济南）
+                                stations.get(j))); // 后续站点（如济南/南京/上海）
             }
         }
         return takeoutStationList;
     }
 
     public static void main(String[] args) {
-        List<String> stations = Arrays.asList("北京南", "济南西", "南京南", "杭州东", "宁波");
-        String startStation = "北京南";
-        String endStation = "南京南";
+        List<String> stations = Arrays.asList("北京", "天津", "济南", "南京", "上海");
+        String startStation = "天津";
+        String endStation = "济南";
         StationCalculateUtil.takeoutStation(stations, startStation, endStation).forEach(System.out::println);
     }
 }
